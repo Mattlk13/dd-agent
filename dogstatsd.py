@@ -416,6 +416,7 @@ class Server(object):
                 ready = select_select(sock, [], [], timeout)
                 if ready[0]:
                     message = socket_recv(buffer_size)
+                    log.debug('received message: %s', message)
                     aggregator_submit(message)
 
                     if should_forward:
