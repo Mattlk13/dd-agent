@@ -22,20 +22,56 @@ This runbook provides automated scripts for both Linux and Windows that will:
 
 ## Available Scripts
 
-### Linux: `linux.sh`
+### Which script should I use?
 
-- **Supported distributions**: Ubuntu/Debian, RHEL/CentOS, Fedora, and similar
+| Your OS | Script to use |
+|---|---|
+| RHEL / CentOS / Oracle Linux **5 or 6** | [`el5-6/linux.sh`](el5-6/linux.sh) |
+| RHEL / CentOS / Oracle Linux **7+** | [`linux.sh`](linux.sh) |
+| Ubuntu / Debian / Fedora / any modern distro | [`linux.sh`](linux.sh) |
+| Windows Server **2008 R2 or 2012 R2** | [`windows-2008-2012/windows.ps1`](windows-2008-2012/windows.ps1) |
+| Windows Server **2016+** | [`windows.ps1`](windows.ps1) |
+
+### `linux.sh` (EL 7+, Ubuntu, Debian, Fedora, and similar)
+
+- **Supported distributions**: Ubuntu/Debian, RHEL/CentOS/Oracle Linux 7+, Fedora, and similar
+- **Requirements**: Root or sudo access, `curl` or `wget`
+
+### `el5-6/linux.sh` (RHEL / CentOS / Oracle Linux 5 and 6)
+
+- **Supported distributions**: RHEL 5/6, CentOS 5/6, Oracle Linux 5/6
 - **Requirements**: Root or sudo access
-- **Automatic features**: Will attempt to install `curl` temporarily if neither `curl` nor `wget` is available
+- **Extra options**:
+  - `-p <agent_directory>` — custom Agent installation path
+  - `-c <cert_file>` — path to a local copy of `datadog-cert.pem` for hosts that cannot reach `raw.githubusercontent.com`
+- **Compatibility notes**:
+  - Works with bash 3.1 (default on EL5) — no associative arrays or bash 4+ features
+  - Does not require the `truncate` binary (absent from coreutils 5.97 shipped with EL5)
+  - Automatically retries the certificate download without TLS verification if the system CA bundle is too old to verify GitHub (common on EL5); the downloaded certificate is then validated against the Datadog endpoint
+  - Skips `journalctl` checks — EL5/6 use SysV init, not systemd
 
-### Windows: `windows.ps1`
+### `windows.ps1` (Windows Server 2016+)
 
 - **Requirements**: PowerShell 3.0 or higher, Administrator privileges
 - **Automatic features**: Auto-detects Agent v5 installation path (handles different versions and architectures)
 
+### `windows-2008-2012/windows.ps1` (Windows Server 2008 R2 and 2012 R2)
+
+- **Requirements**: PowerShell 2.0+, .NET 3.5+, Administrator privileges
+- **Extra options**:
+  - `-AgentDirectory` / `-p` — custom Agent installation path
+  - `-CertFile` / `-c` — path to a local copy of `datadog-cert.pem` for hosts that cannot reach `raw.githubusercontent.com`
+- **Compatibility notes**:
+  - Does not use `Invoke-WebRequest` (PS 3.0+) as primary downloader — uses `System.Net.WebClient` (.NET 2.0) instead, with `Invoke-WebRequest` and BITS as fallbacks
+  - Does not use `Get-Content -Raw` (PS 3.0+) — uses `[System.IO.File]::ReadAllText()` (.NET 2.0) instead
+  - Does not use `[DateTimeOffset]::ToUnixTimeSeconds()` (.NET 4.6+) — replaced with manual epoch subtraction
+  - Does not use `[Environment]::Is64BitOperatingSystem` (.NET 4.0+) — replaced with `[IntPtr]::Size`
+  - Forces TLS 1.2 using the raw integer value `3072` instead of the named enum `[Net.SecurityProtocolType]::Tls12` (.NET 4.5+)
+  - **Windows 2008 R2 and TLS 1.2**: TLS 1.2 also requires a system-level fix (KB3140245 + SChannel registry changes). Without it, downloads from GitHub will fail. In that case, download `datadog-cert.pem` on another machine and use `-CertFile`.
+
 ## How to Use
 
-### Linux
+### Linux (EL 7+, Ubuntu, Debian, Fedora, and similar)
 
 ```bash
 # Download the script
@@ -48,7 +84,26 @@ chmod +x linux.sh
 sudo ./linux.sh
 ```
 
-### Windows
+### Linux (RHEL / CentOS / Oracle Linux 5 or 6)
+
+```bash
+# Download the script
+curl -O https://raw.githubusercontent.com/DataDog/dd-agent/master/runbooks/sectigo-root-ca-rotation-2025/el5-6/linux.sh
+
+# Make it executable
+chmod +x linux.sh
+
+# Run with sudo
+sudo ./linux.sh
+```
+
+If the host **cannot reach GitHub**, download `datadog-cert.pem` on another machine and transfer it manually, then pass it with `-c`:
+
+```bash
+sudo ./linux.sh -c /path/to/datadog-cert.pem
+```
+
+### Windows (Server 2016+)
 
 ```powershell
 # Download the script (run as Administrator)
@@ -56,6 +111,34 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/DataDog/dd-agent/maste
 
 # Run the script
 .\windows.ps1
+```
+
+### Windows (Server 2008 R2 or 2012 R2)
+
+`Invoke-WebRequest` is not available on PowerShell 2.0 (default on 2008 R2). Use `System.Net.WebClient` instead:
+
+```powershell
+# Download the script (run as Administrator)
+(New-Object System.Net.WebClient).DownloadFile(
+    "https://raw.githubusercontent.com/DataDog/dd-agent/master/runbooks/sectigo-root-ca-rotation-2025/windows-2008-2012/windows.ps1",
+    "$env:TEMP\windows.ps1"
+)
+
+# Run the script
+& "$env:TEMP\windows.ps1"
+```
+
+On **2012 R2** (PS 4.0), `Invoke-WebRequest` is available and can be used instead:
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/DataDog/dd-agent/master/runbooks/sectigo-root-ca-rotation-2025/windows-2008-2012/windows.ps1" -OutFile "windows.ps1" -UseBasicParsing
+.\windows.ps1
+```
+
+If the host **cannot reach GitHub** (or TLS 1.2 is not yet enabled at the OS level on 2008 R2), download `datadog-cert.pem` on another machine, transfer it, then pass it with `-CertFile`:
+
+```powershell
+.\windows.ps1 -CertFile "C:\Temp\datadog-cert.pem"
 ```
 
 ## What the Scripts Do
@@ -111,6 +194,18 @@ Ensure your firewall allows these connections.
 ### Script Fails to Download Certificate
 
 Ensure you have network connectivity and your firewall allows outbound HTTPS connections to GitHub.
+
+If the host cannot reach GitHub at all, download `datadog-cert.pem` from another machine and pass it directly to the script:
+
+**Linux (EL5/6)**:
+```bash
+sudo ./linux.sh -c /path/to/datadog-cert.pem
+```
+
+**Windows (2008 R2 / 2012 R2)**:
+```powershell
+.\windows.ps1 -CertFile "C:\Temp\datadog-cert.pem"
+```
 
 ### Agent Fails to Restart
 
