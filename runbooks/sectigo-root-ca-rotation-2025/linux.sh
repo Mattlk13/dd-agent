@@ -34,28 +34,10 @@ done
 # -------------------------- Configuration ---------------------------
 URL="https://raw.githubusercontent.com/DataDog/dd-agent/master/datadog-cert.pem"
 
-CUSTOM_DD_AGENT_DIR="${ARG_AGENT_DIR:-}"
+TARGET_DIR="${ARG_AGENT_DIR:-/opt/datadog-agent/agent}"
 LOCAL_CERT_FILE="${ARG_CERT_FILE:-}"
-CUSTOM_DD_CONFIG_FILE=""
-CUSTOM_DD_LOG_DIR=""
-
-if [ -n "$CUSTOM_DD_AGENT_DIR" ]; then
-  TARGET_DIR="$CUSTOM_DD_AGENT_DIR"
-else
-  TARGET_DIR="/opt/datadog-agent/agent"
-fi
-
-if [ -n "$CUSTOM_DD_CONFIG_FILE" ]; then
-  CONF_FILE="$CUSTOM_DD_CONFIG_FILE"
-else
-  CONF_FILE="/etc/dd-agent/datadog.conf"
-fi
-
-if [ -n "$CUSTOM_DD_LOG_DIR" ]; then
-  LOG_FILES="$CUSTOM_DD_LOG_DIR/forwarder.log $CUSTOM_DD_LOG_DIR/collector.log"
-else
-  LOG_FILES="/var/log/datadog/forwarder.log /var/log/datadog/collector.log"
-fi
+CONF_FILE="/etc/dd-agent/datadog.conf"
+LOG_FILES="/var/log/datadog/forwarder.log /var/log/datadog/collector.log"
 
 TARGET_FILE="${TARGET_DIR}/datadog-cert.pem"
 DOWNLOADER=""

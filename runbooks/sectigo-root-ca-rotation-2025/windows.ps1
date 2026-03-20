@@ -50,8 +50,6 @@ $CERT_URL = "https://raw.githubusercontent.com/DataDog/dd-agent/master/datadog-c
 $RESTART_WAIT_SECONDS = 30
 
 $CUSTOM_DD_AGENT_DIR = if ($AgentDirectory) { $AgentDirectory } else { "" }
-$CUSTOM_DD_CONFIG_FILE = ""
-$CUSTOM_DD_LOG_DIR = ""
 $LOCAL_CERT_FILE = if ($CertFile) { $CertFile } else { "" }
 
 # ------------------------------ Helpers ------------------------------
@@ -111,12 +109,11 @@ function Get-DdV5-CertPath {
 function Get-DdV5-ServiceNames { @("DatadogAgent", "datadogagent") }
 
 function Get-DdV5-ConfigFile {
-    if ($CUSTOM_DD_CONFIG_FILE) { return $CUSTOM_DD_CONFIG_FILE }
     return "C:\ProgramData\Datadog\datadog.conf"
 }
 
 function Get-DdV5-LogFiles {
-    $logDir = if ($CUSTOM_DD_LOG_DIR) { $CUSTOM_DD_LOG_DIR } else { "C:\ProgramData\Datadog\logs" }
+    $logDir = "C:\ProgramData\Datadog\logs"
     $candidates = @("$logDir\forwarder.log", "$logDir\collector.log", "$logDir\agent.log")
     $existing = @()
     foreach ($f in $candidates) { if (Test-Path -LiteralPath $f) { $existing += $f } }
