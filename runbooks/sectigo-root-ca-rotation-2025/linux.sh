@@ -45,6 +45,7 @@ OS_MAJOR=""
 IS_LEGACY_EL=false
 PRE_TS_UNIX=""
 PRE_TS_READABLE=""
+CONNECTIVITY_WARNING=false   # set to true when a non-fatal connectivity check fails
 
 # ------------------------------- Helpers ----------------------------
 
@@ -213,6 +214,7 @@ verify_certificate() {
   if [ "$DOWNLOADER" = "none" ]; then
     echo "Skipping connectivity verification (no curl or wget available)."
     echo "The Agent logs will confirm certificate validity after restart."
+    CONNECTIVITY_WARNING=true
     return 0
   fi
 
@@ -225,14 +227,20 @@ verify_certificate() {
         "$test_url" >/dev/null 2>&1; then
       echo "Certificate verification successful: can connect to Datadog."
     else
-      error_exit "Error: Certificate verification failed. Cannot establish SSL connection to $test_url using the downloaded certificate."
+      echo "Warning: Could not verify connectivity to $test_url using the installed certificate." >&2
+      echo "  This may be a network restriction, firewall rule, or temporary issue." >&2
+      echo "  The certificate has been installed; connectivity will be confirmed after the Agent restarts." >&2
+      CONNECTIVITY_WARNING=true
     fi
   else
     if sudo wget --ca-certificate="$TARGET_FILE" --timeout=10 \
         -q -O /dev/null "$test_url" 2>/dev/null; then
       echo "Certificate verification successful: can connect to Datadog."
     else
-      error_exit "Error: Certificate verification failed. Cannot establish SSL connection to $test_url using the downloaded certificate."
+      echo "Warning: Could not verify connectivity to $test_url using the installed certificate." >&2
+      echo "  This may be a network restriction, firewall rule, or temporary issue." >&2
+      echo "  The certificate has been installed; connectivity will be confirmed after the Agent restarts." >&2
+      CONNECTIVITY_WARNING=true
     fi
   fi
 }
@@ -294,9 +302,13 @@ test_connectivity_since_restart() {
       echo "  Checking $(basename "$log_file")..."
       if sudo grep -qiE "$pattern" "$log_file" 2>/dev/null; then
         echo ""
-        echo "ERROR: Detected SSL/cert verification failure in $(basename "$log_file"):"
-        sudo grep -iE "$pattern" "$log_file" | head -10
-        error_exit "Certificate verification failed. Please review the log at: $log_file"
+        echo "Warning: Detected SSL/cert verification failure in $(basename "$log_file"):" >&2
+        # `|| true` prevents set -o pipefail from aborting when head closes the pipe
+        # early after 10 lines (grep receives SIGPIPE → exits 141).
+        sudo grep -iE "$pattern" "$log_file" | head -10 || true
+        echo "  The certificate has been replaced. Please review the log at: $log_file" >&2
+        echo "  and test Agent connectivity manually (see summary below)." >&2
+        CONNECTIVITY_WARNING=true
       fi
     fi
   done
@@ -312,7 +324,9 @@ test_connectivity_since_restart() {
       SINCE_ARG="$PRE_TS_READABLE"
     fi
     if sudo journalctl -u datadog-agent --since "$SINCE_ARG" --no-pager 2>/dev/null | grep -qiE "$pattern"; then
-      error_exit "Detected SSL/cert verification failure in journald since restart."
+      echo "Warning: Detected SSL/cert verification failure in journald since restart." >&2
+      echo "  The certificate has been replaced. Please test Agent connectivity manually (see summary below)." >&2
+      CONNECTIVITY_WARNING=true
     fi
   fi
 
@@ -323,7 +337,9 @@ test_connectivity_since_restart() {
     echo "Warning: Could not confirm 'API Key is valid' from agent info." >&2
   fi
 
-  echo "Connectivity test passed: no certificate verification errors detected."
+  if [ "$CONNECTIVITY_WARNING" = "false" ]; then
+    echo "Connectivity test passed: no certificate verification errors detected."
+  fi
   echo ""
   echo "Fresh logs are available at:"
   for log_file in $LOG_FILES; do
@@ -347,6 +363,32 @@ main() {
   rotate_logs
   restart_agent
   test_connectivity_since_restart
+
+  echo ""
+  echo "=============================="
+  if [ "$CONNECTIVITY_WARNING" = "true" ]; then
+    echo "DONE — certificate replaced, but connectivity could not be fully verified automatically."
+    echo ""
+    echo "The Datadog certificate has been installed at: $TARGET_FILE"
+    echo "The Agent configuration has been updated and the Agent has been restarted."
+    echo ""
+    echo "Please verify connectivity manually:"
+    echo "  sudo service datadog-agent status"
+    echo "  sudo /etc/init.d/datadog-agent info"
+    echo "  Check logs for SSL errors:"
+    for log_file in $LOG_FILES; do
+      echo "    $log_file"
+    done
+    echo ""
+    echo "If SSL errors persist, contact support with the log output above."
+  else
+    echo "DONE — certificate replaced and connectivity verified successfully."
+    echo ""
+    echo "The Datadog certificate has been installed at: $TARGET_FILE"
+    echo "The Agent configuration has been updated, the Agent has been restarted,"
+    echo "and no SSL/certificate errors were detected in the logs."
+  fi
+  echo "=============================="
 }
 
 main

@@ -75,7 +75,7 @@ function Assert-Admin {
 # -------------------------- Path discovery --------------------------
 function Get-DdV5-CertPath {
     if ($CUSTOM_DD_AGENT_DIR) {
-        if (Test-Path "$CUSTOM_DD_AGENT_DIR\agent") {
+        if (Test-Path -LiteralPath "$CUSTOM_DD_AGENT_DIR\agent") {
             return "$CUSTOM_DD_AGENT_DIR\agent\datadog-cert.pem"
         }
         else {
@@ -251,7 +251,10 @@ function Test-Certificate {
         Write-Host "Connectivity check successful: can reach $testUrl."
     }
     catch {
-        Error-Exit "Error: Cannot reach $testUrl. $($_.Exception.Message)"
+        Write-Warning "Could not reach ${testUrl}: $($_.Exception.Message)"
+        Write-Warning "This may be a network restriction, firewall rule, or temporary issue."
+        Write-Warning "The certificate has been installed; connectivity will be confirmed after the Agent restarts."
+        $script:ConnectivityWarning = $true
     }
 }
 
@@ -344,10 +347,11 @@ function Test-ConnectivitySinceRestart {
                     $content = [System.IO.File]::ReadAllText($logPath)
                     if ($content -and $ErrorPattern.IsMatch($content)) {
                         Write-Host ""
-                        Write-Host ("ERROR: Detected SSL/cert verification failure in {0}:" -f $fileInfo.Name)
+                        Write-Warning ("Detected SSL/cert verification failure in {0}:" -f $fileInfo.Name)
                         $hits = Select-String -Path $logPath -Pattern $ErrorPattern | Select-Object -First 10
                         $hits | ForEach-Object { Write-Host $_.Line }
-                        Error-Exit ("Certificate verification failed. Please review the log at: {0}" -f $logPath)
+                        Write-Warning ("The certificate has been replaced. Please review the log at: {0} and test connectivity manually (see summary below)." -f $logPath)
+                        $script:ConnectivityWarning = $true
                     }
                 }
                 catch {
@@ -384,7 +388,9 @@ function Test-ConnectivitySinceRestart {
     }
     if ($infoOk) { Write-Host "API key validation: OK" } else { Write-Warning "Could not confirm 'API Key is valid' from agent info." }
 
-    Write-Host "Connectivity test passed: no certificate verification errors detected."
+    if (-not $script:ConnectivityWarning) {
+        Write-Host "Connectivity test passed: no certificate verification errors detected."
+    }
     Write-Host ""
     Write-Host "Fresh logs are available at:"
     foreach ($logPath in $LogFiles) {
@@ -393,6 +399,8 @@ function Test-ConnectivitySinceRestart {
 }
 
 # ------------------------------ Main flow ------------------------------
+$script:ConnectivityWarning = $false   # set to $true when a non-fatal connectivity check fails
+
 try {
     Assert-Admin
 
@@ -420,6 +428,35 @@ try {
 
     $ErrorPattern = [regex]'(?i)CERTIFICATE_VERIFY_FAILED|certificate verify failed|ssl[\s\p{P}]*error'
     Test-ConnectivitySinceRestart -LogFiles $LogFiles -ErrorPattern $ErrorPattern
+
+    Write-Host ""
+    Write-Host "=============================="
+    if ($script:ConnectivityWarning) {
+        Write-Host "DONE - certificate replaced, but connectivity could not be fully verified automatically."
+        Write-Host ""
+        Write-Host "The Datadog certificate has been installed at: $TargetFile"
+        Write-Host "The Agent configuration has been updated and the Agent has been restarted."
+        Write-Host ""
+        # agent.exe lives two levels above datadog-cert.pem regardless of version:
+        #   >=5.12:  ...\Datadog Agent\agent\datadog-cert.pem  → ...\Datadog Agent\agent.exe
+        #   <=5.11:  ...\Datadog Agent\files\datadog-cert.pem  → ...\Datadog Agent\agent.exe
+        $agentExe = Join-Path (Split-Path -Path (Split-Path -Path $TargetFile -Parent) -Parent) "agent.exe"
+        Write-Host "Please verify connectivity manually:"
+        Write-Host "  - Check the Datadog Agent service:  Get-Service DatadogAgent"
+        Write-Host "  - Run agent info:                   & '$agentExe' info"
+        Write-Host "  - Check logs for SSL errors:"
+        foreach ($logPath in $LogFiles) { Write-Host "      $logPath" }
+        Write-Host ""
+        Write-Host "If SSL errors persist, contact support with the log output above."
+    }
+    else {
+        Write-Host "DONE - certificate replaced and connectivity verified successfully."
+        Write-Host ""
+        Write-Host "The Datadog certificate has been installed at: $TargetFile"
+        Write-Host "The Agent configuration has been updated, the Agent has been restarted,"
+        Write-Host "and no SSL/certificate errors were detected in the logs."
+    }
+    Write-Host "=============================="
 }
 catch {
     Error-Exit $_.Exception.Message

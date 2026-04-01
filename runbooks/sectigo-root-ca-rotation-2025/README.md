@@ -114,31 +114,62 @@ If the host **cannot reach GitHub** (or TLS 1.2 is not yet enabled at the OS lev
 
 Both scripts perform the following steps automatically:
 
-1. **Download Updated Certificate**: Fetches the latest Datadog certificate bundle
+1. **Download Updated Certificate**: Fetches the latest Datadog certificate bundle (or uses the file you supply with `-c` / `-CertFile`)
 2. **Install Certificate**: Places the certificate in the correct location for your Agent installation
-3. **Update Configuration**: Enables `use_curl_http_client: true` in your datadog.conf to allow the Agent to use OS-provided certificates
+3. **Update Configuration**: Enables `use_curl_http_client: true` in your `datadog.conf` to allow the Agent to use OS-provided certificates
 4. **Restart Agent**: Restarts the Datadog Agent to apply changes
-5. **Verify Connectivity**: Checks logs for certificate errors and confirms API key validation
+5. **Verify Connectivity** *(best-effort)*: Scans fresh Agent logs for SSL/certificate errors and confirms API key validation. If automatic verification is not possible (e.g., network restrictions, no curl/wget, or a firewall blocks the test endpoint), the script completes with a warning and clear instructions to test manually — the certificate is still installed.
 
-The scripts will output detailed progress information and report any errors encountered.
+The scripts output detailed progress information and always print a final summary indicating what was done and, if applicable, what you need to verify manually.
 
 ## Expected Output
 
-When the script completes successfully, you should see:
+### Certificate replaced and connectivity verified
 
 ```
-Downloading the DataDog certificate...
-Certificate downloaded successfully to [path]
-Updating configuration file...
-Configuration file updated successfully.
-Restarting the DataDog Agent...
-Waiting 30 seconds for the DataDog Agent to restart...
+...
 === Connectivity test (since this restart) ===
+  Checking forwarder.log...
+  Checking agent status...
 API key validation: OK
-Connectivity test passed: no certificate verification errors since restart.
+Connectivity test passed: no certificate verification errors detected.
+
+==============================
+DONE — certificate replaced and connectivity verified successfully.
+
+The Datadog certificate has been installed at: /opt/datadog-agent/agent/datadog-cert.pem
+The Agent configuration has been updated, the Agent has been restarted,
+and no SSL/certificate errors were detected in the logs.
+==============================
 ```
 
-If errors are detected, the script will display a specific error message and prompt you to contact support.
+### Certificate replaced but connectivity could not be auto-verified
+
+This happens when network restrictions prevent the test connection, or when neither curl nor wget is available. The certificate is still correctly installed:
+
+```
+Warning: Could not verify connectivity to https://app.datadoghq.com using the installed certificate.
+  This may be a network restriction, firewall rule, or temporary issue.
+  The certificate has been installed; connectivity will be confirmed after the Agent restarts.
+...
+==============================
+DONE — certificate replaced, but connectivity could not be fully verified automatically.
+
+The Datadog certificate has been installed at: /opt/datadog-agent/agent/datadog-cert.pem
+The Agent configuration has been updated and the Agent has been restarted.
+
+Please verify connectivity manually:
+  sudo service datadog-agent status
+  sudo /etc/init.d/datadog-agent info
+  Check logs for SSL errors:
+    /var/log/datadog/forwarder.log
+    /var/log/datadog/collector.log
+
+If SSL errors persist, contact support with the log output above.
+==============================
+```
+
+If a *fatal* step fails (certificate not found, config file missing, Agent failed to restart), the script exits immediately with a specific error message explaining why.
 
 ## Important Notes
 
@@ -192,15 +223,17 @@ sudo service datadog-agent status
 Get-Service DatadogAgent
 ```
 
-### Connectivity Test Fails
+### Connectivity Could Not Be Verified Automatically
 
-If certificate errors persist after running the script:
+The script completes even when it cannot verify connectivity (e.g., the test endpoint is blocked by a firewall). It will print a warning and a manual checklist at the end.
 
-1. Verify your operating system is receiving security updates
-2. Check the Agent logs for detailed error messages:
+If SSL/certificate errors **persist after the Agent has restarted**, check:
+
+1. Verify your operating system is receiving security updates (the `use_curl_http_client: true` fallback relies on the OS certificate store)
+2. Check the Agent logs for SSL/certificate error messages:
    - Linux: `/var/log/datadog/forwarder.log` and `/var/log/datadog/collector.log`
    - Windows: `C:\ProgramData\Datadog\logs\forwarder.log` and `collector.log`
-3. Contact Datadog Support with the script output and log excerpts
+3. Contact Datadog Support with the full script output and relevant log excerpts
 
 ### Permission Errors
 
