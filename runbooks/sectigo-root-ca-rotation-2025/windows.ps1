@@ -432,7 +432,7 @@ try {
     Write-Host ""
     Write-Host "=============================="
     if ($script:ConnectivityWarning) {
-        Write-Host "DONE - certificate replaced, but connectivity could not be fully verified automatically."
+        Write-Host "DONE — certificate replaced, but connectivity could not be fully verified automatically."
         Write-Host ""
         Write-Host "The Datadog certificate has been installed at: $TargetFile"
         Write-Host "The Agent configuration has been updated and the Agent has been restarted."
@@ -450,7 +450,7 @@ try {
         Write-Host "If SSL errors persist, contact support with the log output above."
     }
     else {
-        Write-Host "DONE - certificate replaced and connectivity verified successfully."
+        Write-Host "DONE — certificate replaced and connectivity verified successfully."
         Write-Host ""
         Write-Host "The Datadog certificate has been installed at: $TargetFile"
         Write-Host "The Agent configuration has been updated, the Agent has been restarted,"
