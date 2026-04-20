@@ -250,6 +250,13 @@ update_datadog_config() {
     error_exit "Error: Configuration file $CONF_FILE not found."
   fi
 
+  local timestamp backup
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  backup="${CONF_FILE}.pre-cert-update-${timestamp}"
+  echo "Backing up $CONF_FILE to $backup"
+  sudo cp -p "$CONF_FILE" "$backup" \
+    || error_exit "Error: Failed to back up $CONF_FILE to $backup."
+
   echo "Updating $CONF_FILE for use_curl_http_client..."
   if sudo grep -q '^[[:space:]]*use_curl_http_client' "$CONF_FILE"; then
     echo "Parameter 'use_curl_http_client' found. Setting its value to true..."
@@ -323,7 +330,11 @@ test_connectivity_since_restart() {
     if ! sudo journalctl --since "$SINCE_ARG" -n 0 >/dev/null 2>&1; then
       SINCE_ARG="$PRE_TS_READABLE"
     fi
-    if sudo journalctl -u datadog-agent --since "$SINCE_ARG" --no-pager 2>/dev/null | grep -qiE "$pattern"; then
+    # `|| true` prevents set -o pipefail from aborting when grep -q closes the pipe
+    # on first match (journalctl receives SIGPIPE → exits 141).
+    local journal_match
+    journal_match="$(sudo journalctl -u datadog-agent --since "$SINCE_ARG" --no-pager 2>/dev/null | grep -iE "$pattern" | head -1 || true)"
+    if [ -n "$journal_match" ]; then
       echo "Warning: Detected SSL/cert verification failure in journald since restart." >&2
       echo "  The certificate has been replaced. Please test Agent connectivity manually (see summary below)." >&2
       CONNECTIVITY_WARNING=true
