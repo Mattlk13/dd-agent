@@ -179,7 +179,7 @@ The fallback mechanism (`use_curl_http_client: true`) relies on your operating s
 
 ### Configuration Changes
 
-The script modifies your `/etc/dd-agent/datadog.conf` (Linux) or `C:\ProgramData\Datadog\datadog.conf` (Windows) file. On Windows, a backup is automatically created before modification.
+The script modifies your `/etc/dd-agent/datadog.conf` (Linux) or `C:\ProgramData\Datadog\datadog.conf` (Windows) file. On both platforms, a timestamped backup (`*.pre-cert-update-<timestamp>` on Linux, `*.bak-<timestamp>` on Windows) is automatically created before modification.
 
 ### Network Requirements
 

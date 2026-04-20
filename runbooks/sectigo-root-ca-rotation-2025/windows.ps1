@@ -94,7 +94,7 @@ function Get-DdV5-CertPath {
             ($null -ne $env:PROCESSOR_ARCHITEW6432 -and $env:PROCESSOR_ARCHITEW6432 -eq 'AMD64')
 
     if ($is64) {
-        if (Test-Path "C:\Program Files\Datadog\Datadog Agent\agent") {
+        if (Test-Path -LiteralPath "C:\Program Files\Datadog\Datadog Agent\agent") {
             return "C:\Program Files\Datadog\Datadog Agent\agent\datadog-cert.pem"    # >=5.12
         }
         else {
