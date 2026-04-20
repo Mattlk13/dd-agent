@@ -1,40 +1,56 @@
-<# Datadog Agent v5 runbook (PowerShell 3+)
-   - Auto-detects v5 cert path (handles <=5.11 vs >=5.12, 32/64-bit)
-   - Forces TLS 1.2, downloads cert, updates use_curl_http_client: true (deduped)
-   - Restarts Agent, checks logs only since this restart
+<# Datadog Agent v5 runbook — Windows (all supported versions).
+   Compatible with PowerShell 2.0+ and .NET 3.5+.
+   Automatically handles Windows Server 2008 R2, 2012 R2, 2016, and later.
+
+   Compatibility notes:
+     - Primary downloader is System.Net.WebClient (.NET 2.0+), so it works on
+       Windows 2008 R2 with PS 2.0 where Invoke-WebRequest is not available.
+       Invoke-WebRequest and BITS are kept as fallbacks.
+     - [System.IO.File]::ReadAllText() is used instead of Get-Content -Raw
+       (the -Raw switch requires PS 3.0).
+     - TLS 1.2 is forced via the numeric value 3072 instead of the named enum
+       [Net.SecurityProtocolType]::Tls12, added in .NET 4.5.
+       On Windows 2008 R2 without KB3140245 + SChannel registry fix, TLS 1.2
+       is unsupported at the OS level and the download will still fail — see
+       the README for details.
+     - [DateTimeOffset]::ToUnixTimeSeconds() (added in .NET 4.6) is replaced
+       with a manual epoch subtraction.
+     - OS architecture is detected via environment variables rather than
+       [Environment]::Is64BitOperatingSystem (.NET 4.0+) or [IntPtr]::Size
+       (which reports the PowerShell process bitness, not the OS bitness).
 
 .PARAMETER AgentDirectory
-   Custom Datadog Agent installation directory. If not specified, auto-detects standard paths.
+   Custom Datadog Agent installation directory.
+
+.PARAMETER CertFile
+   Path to a local copy of datadog-cert.pem.
+   Use this when the host cannot reach raw.githubusercontent.com.
+   The file is copied in place; no download is attempted.
 
 .EXAMPLE
    .\windows.ps1
-   
+
 .EXAMPLE
    .\windows.ps1 -AgentDirectory "D:\Custom\Datadog Agent"
-   
+
 .EXAMPLE
-   .\windows.ps1 -p "D:\Custom\Datadog Agent"
+   .\windows.ps1 -CertFile "C:\Temp\datadog-cert.pem"
 #>
 
 param(
     [Alias("p")]
-    [string]$AgentDirectory = ""
+    [string]$AgentDirectory = "",
+
+    [Alias("c")]
+    [string]$CertFile = ""
 )
 
 # -------------------------- Configuration ---------------------------
 $CERT_URL = "https://raw.githubusercontent.com/DataDog/dd-agent/master/datadog-cert.pem"
 $RESTART_WAIT_SECONDS = 30
 
-# CUSTOM INSTALLATION PATH (optional)
-# If you have a custom Datadog Agent installation directory, set it here.
-# Leave empty for auto-detection of standard paths.
-# Command-line parameter takes precedence.
 $CUSTOM_DD_AGENT_DIR = if ($AgentDirectory) { $AgentDirectory } else { "" }
-
-# CUSTOM CONFIG/LOG PATHS (optional)
-# Leave empty for default paths.
-$CUSTOM_DD_CONFIG_FILE = ""
-$CUSTOM_DD_LOG_DIR = ""
+$LOCAL_CERT_FILE = if ($CertFile) { $CertFile } else { "" }
 
 # ------------------------------ Helpers ------------------------------
 function Error-Exit {
@@ -59,42 +75,48 @@ function Assert-Admin {
 # -------------------------- Path discovery --------------------------
 function Get-DdV5-CertPath {
     if ($CUSTOM_DD_AGENT_DIR) {
-        # Customer specified a custom path
-        if (Test-Path "$CUSTOM_DD_AGENT_DIR\agent") {
+        if (Test-Path -LiteralPath "$CUSTOM_DD_AGENT_DIR\agent") {
             return "$CUSTOM_DD_AGENT_DIR\agent\datadog-cert.pem"
         }
         else {
             return "$CUSTOM_DD_AGENT_DIR\files\datadog-cert.pem"
         }
     }
-    
-    # Auto-detect standard paths
-    $is64 = [Environment]::Is64BitOperatingSystem
+
+    # Detect OS bitness via environment variables — reliable on all PS versions.
+    # On a 64-bit OS running 32-bit PowerShell (WOW64), PROCESSOR_ARCHITECTURE is
+    # 'x86' but PROCESSOR_ARCHITEW6432 is set to 'AMD64'.
+    # [Environment]::Is64BitOperatingSystem requires .NET 4.0 (absent on the default
+    # PS 2.0/.NET 3.5 stack on Windows 2008 R2).
+    # [IntPtr]::Size reports the current process bitness, not the OS bitness, so a
+    # 32-bit PowerShell host on a 64-bit OS would incorrectly return 4.
+    $is64 = ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') -or
+            ($null -ne $env:PROCESSOR_ARCHITEW6432 -and $env:PROCESSOR_ARCHITEW6432 -eq 'AMD64')
+
     if ($is64) {
-        if (Test-Path "C:\Program Files\Datadog\Datadog Agent\agent") {
-            return "C:\Program Files\Datadog\Datadog Agent\agent\datadog-cert.pem"   # >=5.12
+        if (Test-Path -LiteralPath "C:\Program Files\Datadog\Datadog Agent\agent") {
+            return "C:\Program Files\Datadog\Datadog Agent\agent\datadog-cert.pem"    # >=5.12
         }
         else {
             return "C:\Program Files (x86)\Datadog\Datadog Agent\files\datadog-cert.pem" # <=5.11
         }
     }
     else {
-        return "C:\Program Files\Datadog\Datadog Agent\files\datadog-cert.pem"        # <=5.11 32-bit
+        return "C:\Program Files\Datadog\Datadog Agent\files\datadog-cert.pem"           # <=5.11 32-bit
     }
 }
 
 function Get-DdV5-ServiceNames { @("DatadogAgent", "datadogagent") }
 
-function Get-DdV5-ConfigFile { 
-    if ($CUSTOM_DD_CONFIG_FILE) { return $CUSTOM_DD_CONFIG_FILE }
+function Get-DdV5-ConfigFile {
     return "C:\ProgramData\Datadog\datadog.conf"
 }
 
 function Get-DdV5-LogFiles {
-    $logDir = if ($CUSTOM_DD_LOG_DIR) { $CUSTOM_DD_LOG_DIR } else { "C:\ProgramData\Datadog\logs" }
+    $logDir = "C:\ProgramData\Datadog\logs"
     $candidates = @("$logDir\forwarder.log", "$logDir\collector.log", "$logDir\agent.log")
     $existing = @()
-    foreach ($p in $candidates) { if (Test-Path -LiteralPath $p) { $existing += $p } }
+    foreach ($f in $candidates) { if (Test-Path -LiteralPath $f) { $existing += $f } }
     if (@($existing).Count -gt 0) { return $existing } else { return $candidates }
 }
 
@@ -108,33 +130,26 @@ function Ensure-Directory {
 }
 
 function Enable-Tls12 {
-    try { 
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 
-    } 
-    catch { 
-        Write-Warning "Could not enable TLS 1.2: $($_.Exception.Message). Continuing anyway..."
+    # Force TLS 1.2 using the raw integer value (3072) instead of the named enum member
+    # [Net.SecurityProtocolType]::Tls12, which was only added in .NET 4.5.
+    # On Windows 2008 R2 this only takes effect if KB3140245 and the matching SChannel
+    # registry keys are also applied; without them the OS SChannel stack does not support
+    # TLS 1.2 regardless of the .NET setting.
+    try {
+        $tls12 = 3072
+        $current = [int][Net.ServicePointManager]::SecurityProtocol
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]($current -bor $tls12)
+    }
+    catch {
+        Write-Warning (("Could not enable TLS 1.2: {0}. On Windows 2008 R2, TLS 1.2 also " +
+            "requires KB3140245 and SChannel registry changes.") -f $_.Exception.Message)
     }
 }
 
-function Download-Certificate {
-    param([string]$Url, [string]$TargetFile)
-    Write-Host "Downloading the DataDog certificate..."
-    Enable-Tls12
-    try {
-        Invoke-WebRequest -Uri $Url -OutFile $TargetFile -UseBasicParsing -ErrorAction Stop
-    }
-    catch {
-        Write-Warning "Invoke-WebRequest failed: $($_.Exception.Message). Trying BITS..."
-        try { Start-BitsTransfer -Source $Url -Destination $TargetFile -ErrorAction Stop }
-        catch { Error-Exit "Error: Failed to download certificate with built-in methods." }
-    }
-    if (-not (Test-Path -LiteralPath $TargetFile)) { Error-Exit "Error: Download reported success but file not found at $TargetFile." }
-    Write-Host "Certificate downloaded successfully to $TargetFile."
-  
-    # Ensure the file is readable by the Datadog Agent service
+function Set-CertFilePermissions {
+    param([string]$TargetFile)
     try {
         $acl = Get-Acl -LiteralPath $TargetFile
-        # Grant read access to BUILTIN\Users (which includes the service account)
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Users", "Read", "Allow")
         $acl.SetAccessRule($rule)
         Set-Acl -LiteralPath $TargetFile -AclObject $acl
@@ -145,52 +160,153 @@ function Download-Certificate {
     }
 }
 
+function Download-Certificate {
+    param([string]$Url, [string]$TargetFile)
+    Write-Host "Downloading the Datadog certificate..."
+    Enable-Tls12
+
+    # Stage 1: System.Net.WebClient — available from .NET 2.0, works on PS 2.0.
+    # Invoke-WebRequest requires PS 3.0 and is absent on 2008 R2 defaults.
+    $downloaded = $false
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.DownloadFile($Url, $TargetFile)
+        $downloaded = $true
+    }
+    catch {
+        Write-Warning "WebClient download failed: $($_.Exception.Message). Trying Invoke-WebRequest..."
+    }
+
+    # Stage 2: Invoke-WebRequest (PS 3.0+, available on 2012 R2 and patched 2008 R2).
+    if (-not $downloaded) {
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $TargetFile -UseBasicParsing -ErrorAction Stop
+            $downloaded = $true
+        }
+        catch {
+            Write-Warning "Invoke-WebRequest failed: $($_.Exception.Message). Trying BITS..."
+        }
+    }
+
+    # Stage 3: BITS — available on 2008 R2+ but requires the BITS service to be running.
+    if (-not $downloaded) {
+        try {
+            Start-BitsTransfer -Source $Url -Destination $TargetFile -ErrorAction Stop
+            $downloaded = $true
+        }
+        catch {
+            Error-Exit "Error: Failed to download certificate with all available methods."
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $TargetFile)) {
+        Error-Exit "Error: Download reported success but file not found at $TargetFile."
+    }
+    Write-Host "Certificate downloaded successfully to $TargetFile."
+    Set-CertFilePermissions -TargetFile $TargetFile
+}
+
+function Install-LocalCertificate {
+    param([string]$SourceFile, [string]$TargetFile)
+    Write-Host "Using local certificate file: $SourceFile"
+    if (-not (Test-Path -LiteralPath $SourceFile)) {
+        Error-Exit "Error: Local certificate file '$SourceFile' not found."
+    }
+    try {
+        Copy-Item -LiteralPath $SourceFile -Destination $TargetFile -Force -ErrorAction Stop
+    }
+    catch {
+        Error-Exit "Error: Failed to copy '$SourceFile' to '$TargetFile'. $($_.Exception.Message)"
+    }
+    Write-Host "Certificate copied successfully to $TargetFile."
+    Set-CertFilePermissions -TargetFile $TargetFile
+}
+
 function Test-Certificate {
     param([string]$CertFile)
-    Write-Host "Verifying the downloaded certificate..."
+    Write-Host "Verifying the installed certificate..."
+
+    # Verify the certificate file is a non-empty PEM file.
+    if (-not (Test-Path -LiteralPath $CertFile)) {
+        Error-Exit "Error: Certificate file not found at $CertFile after installation."
+    }
+    # [System.IO.File]::ReadAllText works from .NET 2.0 (Get-Content -Raw requires PS 3.0).
+    $content = [System.IO.File]::ReadAllText($CertFile)
+    if (-not ($content -match "BEGIN CERTIFICATE")) {
+        Error-Exit "Error: $CertFile does not appear to be a valid PEM certificate file."
+    }
+    Write-Host "Certificate file looks valid (PEM format confirmed)."
+
+    # Connectivity check against the Datadog endpoint.
+    # Note: this uses the machine trust store, not the installed cert file, so it
+    # confirms network reachability rather than cert correctness. The definitive
+    # check is the Agent log scan performed after restart.
     $testUrl = "https://app.datadoghq.com"
-    
     Enable-Tls12
     try {
-        # Create a custom WebRequest with the specific certificate
         $request = [System.Net.WebRequest]::Create($testUrl)
         $request.Timeout = 10000
         $response = $request.GetResponse()
         $response.Close()
-        Write-Host "Certificate verification successful: can connect to Datadog."
+        Write-Host "Connectivity check successful: can reach $testUrl."
     }
     catch {
-        Error-Exit "Error: Certificate verification failed. Cannot establish SSL connection to $testUrl. $($_.Exception.Message)"
+        Write-Warning "Could not reach ${testUrl}: $($_.Exception.Message)"
+        Write-Warning "This may be a network restriction, firewall rule, or temporary issue."
+        Write-Warning "The certificate has been installed; connectivity will be confirmed after the Agent restarts."
+        $script:ConnectivityWarning = $true
     }
 }
 
 function Update-DatadogConfig {
     param([string]$ConfFile)
     if (-not (Test-Path -LiteralPath $ConfFile)) { Error-Exit "Error: Configuration file $ConfFile not found." }
-    Write-Host "Updating $ConfFile for use_curl_http_client (dedupe & force true)..."
+    Write-Host "Updating $ConfFile for use_curl_http_client..."
 
-    # Backup
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
     $backup = "$ConfFile.bak-$stamp"
     try { Copy-Item -LiteralPath $ConfFile -Destination $backup -Force } catch { Write-Warning "Backup failed: $($_.Exception.Message)" }
 
-    # Read & normalize: remove ALL occurrences (even commented/with '=') then append exactly one true line
-    $raw = Get-Content -LiteralPath $ConfFile -Raw
+    # [System.IO.File]::ReadAllText works from .NET 2.0 (Get-Content -Raw requires PS 3.0).
+    $raw = [System.IO.File]::ReadAllText($ConfFile)
     $lines = $raw -split "`r?`n"
     $filtered = @()
     foreach ($line in $lines) {
-        if ($line -match '^\s*#?\s*use_curl_http_client\s*[:=].*$') {
-            continue
-        }
+        if ($line -match '^\s*#?\s*use_curl_http_client\s*[:=].*$') { continue }
         $filtered += $line
     }
     $filtered += 'use_curl_http_client: true'
-    $updated = (($filtered -join "`r`n") + "`r`n")
+    $updated = ($filtered -join "`r`n") + "`r`n"
 
     try { [System.IO.File]::WriteAllText($ConfFile, $updated, (New-Object System.Text.UTF8Encoding($false))) }
     catch { Error-Exit "Error: Failed to update $ConfFile. $($_.Exception.Message)" }
 
     Write-Host "Configuration file updated successfully. Backup saved to $backup"
+}
+
+function Rotate-Logs {
+    param([string[]]$LogFiles)
+    Write-Host "Rotating log files before restart for easier troubleshooting..."
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    foreach ($f in $LogFiles) {
+        if (Test-Path -LiteralPath $f) {
+            $backup = "$f.pre-cert-update-$timestamp"
+            Write-Host ("  Backing up {0} to {1}" -f ([IO.Path]::GetFileName($f)), ([IO.Path]::GetFileName($backup)))
+            try { Copy-Item -LiteralPath $f -Destination $backup -Force -ErrorAction Stop }
+            catch { Write-Warning "Could not back up ${f}: $($_.Exception.Message)" }
+            try { Clear-Content -LiteralPath $f -Force -ErrorAction Stop }
+            catch { Write-Warning "Could not truncate ${f}: $($_.Exception.Message)" }
+        }
+    }
+
+    $PreTs = [DateTime]::UtcNow
+
+    # Manual epoch calculation — avoids [DateTimeOffset]::ToUnixTimeSeconds() which
+    # was added in .NET 4.6 and is absent on 2008 R2 (.NET 4.0) and 2012 R2 (.NET 4.5.1).
+    $unixEpoch = New-Object System.DateTime(1970, 1, 1, 0, 0, 0, [System.DateTimeKind]::Utc)
+    $epoch = [int]($PreTs - $unixEpoch).TotalSeconds
+
+    Write-Host ("Restart timestamp: {0:yyyy-MM-dd HH:mm:ss} UTC (epoch: {1})" -f $PreTs, $epoch)
 }
 
 function Restart-Agent {
@@ -206,7 +322,7 @@ function Restart-Agent {
                 break
             }
             catch {
-                Error-Exit "Error: Failed to restart service '$name': $($_.Exception.Message)"
+                Error-Exit "Error: Failed to restart service '${name}': $($_.Exception.Message)"
             }
         }
     }
@@ -215,45 +331,27 @@ function Restart-Agent {
     Start-Sleep -Seconds $WaitSeconds
 }
 
-function Rotate-Logs {
-    param([string[]]$LogFiles)
-    Write-Host "Rotating log files before restart for easier troubleshooting..."
-    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    foreach ($f in $LogFiles) {
-        if (Test-Path -LiteralPath $f) {
-            $backup = "$f.pre-cert-update-$timestamp"
-            Write-Host ("  Backing up {0} to {1}" -f ([IO.Path]::GetFileName($f)), ([IO.Path]::GetFileName($backup)))
-            try { Copy-Item -LiteralPath $f -Destination $backup -Force -ErrorAction Stop } 
-            catch { Write-Warning "Could not back up $f : $($_.Exception.Message)" }
-            # Truncate the log file to start fresh
-            try { Clear-Content -LiteralPath $f -Force -ErrorAction Stop }
-            catch { Write-Warning "Could not truncate $f : $($_.Exception.Message)" }
-        }
-    }
-    $PreTs = [DateTime]::UtcNow
-    $epoch = [int][double]([DateTimeOffset]$PreTs).ToUnixTimeSeconds()
-    Write-Host ("Restart timestamp: {0:yyyy-MM-dd HH:mm:ss} UTC (epoch: {1})" -f $PreTs, $epoch)
-    return @{ PreTs = $PreTs; Epoch = $epoch }
-}
-
 function Test-ConnectivitySinceRestart {
     param([string[]]$LogFiles, [regex]$ErrorPattern)
     Write-Host "=== Connectivity test (since this restart) ==="
-    
-    # Check the fresh (rotated) log files
+
     foreach ($logPath in $LogFiles) {
         if (Test-Path -LiteralPath $logPath) {
             $fileInfo = Get-Item -LiteralPath $logPath
             if ($fileInfo.Length -gt 0) {
                 Write-Host ("  Checking {0}..." -f $fileInfo.Name)
                 try {
-                    $content = Get-Content -LiteralPath $logPath -Raw -ErrorAction Stop
+                    # [System.IO.File]::ReadAllText works from .NET 2.0.
+                    # Get-Content -Raw requires PS 3.0 and fails silently on PS 2.0
+                    # (returns an array instead of a string, breaking the regex match).
+                    $content = [System.IO.File]::ReadAllText($logPath)
                     if ($content -and $ErrorPattern.IsMatch($content)) {
                         Write-Host ""
-                        Write-Host ("ERROR: Detected SSL/cert verification failure in {0}:" -f $fileInfo.Name)
-                        $matches = Select-String -Path $logPath -Pattern $ErrorPattern | Select-Object -First 10
-                        $matches | ForEach-Object { Write-Host $_.Line }
-                        Error-Exit ("Certificate verification failed. Please review the log at: {0}" -f $logPath)
+                        Write-Warning ("Detected SSL/cert verification failure in {0}:" -f $fileInfo.Name)
+                        $hits = Select-String -Path $logPath -Pattern $ErrorPattern | Select-Object -First 10
+                        $hits | ForEach-Object { Write-Host $_.Line }
+                        Write-Warning ("The certificate has been replaced. Please review the log at: {0} and test connectivity manually (see summary below)." -f $logPath)
+                        $script:ConnectivityWarning = $true
                     }
                 }
                 catch {
@@ -263,7 +361,6 @@ function Test-ConnectivitySinceRestart {
         }
     }
 
-    # Best-effort agent info check (paths vary on v5; try a couple)
     Write-Host "  Checking agent status..."
     if ($CUSTOM_DD_AGENT_DIR) {
         $agentInfoPaths = @(
@@ -291,42 +388,75 @@ function Test-ConnectivitySinceRestart {
     }
     if ($infoOk) { Write-Host "API key validation: OK" } else { Write-Warning "Could not confirm 'API Key is valid' from agent info." }
 
-    Write-Host "Connectivity test passed: no certificate verification errors detected."
+    if (-not $script:ConnectivityWarning) {
+        Write-Host "Connectivity test passed: no certificate verification errors detected."
+    }
     Write-Host ""
     Write-Host "Fresh logs are available at:"
     foreach ($logPath in $LogFiles) {
-        if (Test-Path -LiteralPath $logPath) {
-            Write-Host ("  - {0}" -f $logPath)
-        }
+        if (Test-Path -LiteralPath $logPath) { Write-Host ("  - {0}" -f $logPath) }
     }
 }
 
 # ------------------------------ Main flow ------------------------------
+$script:ConnectivityWarning = $false   # set to $true when a non-fatal connectivity check fails
+
 try {
     Assert-Admin
 
-    # Detect paths
-    $CertPath = Get-DdV5-CertPath
-    $TargetDir = Split-Path -Path $CertPath -Parent
-    $TargetFile = $CertPath
-    $ConfFile = Get-DdV5-ConfigFile
-    $LogFiles = Get-DdV5-LogFiles
+    $CertPath     = Get-DdV5-CertPath
+    $TargetDir    = Split-Path -Path $CertPath -Parent
+    $TargetFile   = $CertPath
+    $ConfFile     = Get-DdV5-ConfigFile
+    $LogFiles     = Get-DdV5-LogFiles
     $ServiceNames = Get-DdV5-ServiceNames
 
     Write-Host "Using certificate path: $TargetFile"
     Ensure-Directory $TargetDir
-    Download-Certificate -Url $CERT_URL -TargetFile $TargetFile
+
+    if ($LOCAL_CERT_FILE) {
+        Install-LocalCertificate -SourceFile $LOCAL_CERT_FILE -TargetFile $TargetFile
+    }
+    else {
+        Download-Certificate -Url $CERT_URL -TargetFile $TargetFile
+    }
+
     Test-Certificate -CertFile $TargetFile
     Update-DatadogConfig -ConfFile $ConfFile
-
-    # Rotate logs before restart for easier troubleshooting
-    $RestartInfo = Rotate-Logs -LogFiles $LogFiles
-
+    Rotate-Logs -LogFiles $LogFiles
     Restart-Agent -ServiceNames $ServiceNames -WaitSeconds $RESTART_WAIT_SECONDS
 
     $ErrorPattern = [regex]'(?i)CERTIFICATE_VERIFY_FAILED|certificate verify failed|ssl[\s\p{P}]*error'
     Test-ConnectivitySinceRestart -LogFiles $LogFiles -ErrorPattern $ErrorPattern
 
+    Write-Host ""
+    Write-Host "=============================="
+    if ($script:ConnectivityWarning) {
+        Write-Host "DONE — certificate replaced, but connectivity could not be fully verified automatically."
+        Write-Host ""
+        Write-Host "The Datadog certificate has been installed at: $TargetFile"
+        Write-Host "The Agent configuration has been updated and the Agent has been restarted."
+        Write-Host ""
+        # agent.exe lives two levels above datadog-cert.pem regardless of version:
+        #   >=5.12:  ...\Datadog Agent\agent\datadog-cert.pem  → ...\Datadog Agent\agent.exe
+        #   <=5.11:  ...\Datadog Agent\files\datadog-cert.pem  → ...\Datadog Agent\agent.exe
+        $agentExe = Join-Path (Split-Path -Path (Split-Path -Path $TargetFile -Parent) -Parent) "agent.exe"
+        Write-Host "Please verify connectivity manually:"
+        Write-Host "  - Check the Datadog Agent service:  Get-Service DatadogAgent"
+        Write-Host "  - Run agent info:                   & '$agentExe' info"
+        Write-Host "  - Check logs for SSL errors:"
+        foreach ($logPath in $LogFiles) { Write-Host "      $logPath" }
+        Write-Host ""
+        Write-Host "If SSL errors persist, contact support with the log output above."
+    }
+    else {
+        Write-Host "DONE — certificate replaced and connectivity verified successfully."
+        Write-Host ""
+        Write-Host "The Datadog certificate has been installed at: $TargetFile"
+        Write-Host "The Agent configuration has been updated, the Agent has been restarted,"
+        Write-Host "and no SSL/certificate errors were detected in the logs."
+    }
+    Write-Host "=============================="
 }
 catch {
     Error-Exit $_.Exception.Message

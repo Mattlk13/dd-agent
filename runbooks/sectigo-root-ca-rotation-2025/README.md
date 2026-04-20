@@ -22,16 +22,39 @@ This runbook provides automated scripts for both Linux and Windows that will:
 
 ## Available Scripts
 
-### Linux: `linux.sh`
+| Your OS | Script to use |
+|---|---|
+| Linux (all distributions) | [`linux.sh`](linux.sh) |
+| Windows (all supported versions) | [`windows.ps1`](windows.ps1) |
 
-- **Supported distributions**: Ubuntu/Debian, RHEL/CentOS, Fedora, and similar
-- **Requirements**: Root or sudo access
-- **Automatic features**: Will attempt to install `curl` temporarily if neither `curl` nor `wget` is available
+### `linux.sh`
 
-### Windows: `windows.ps1`
+- **Supported distributions**: Ubuntu/Debian, RHEL/CentOS/Oracle Linux 5+, Fedora, and similar
+- **Requirements**: Root or sudo access, `curl` or `wget`
+- **Options**:
+  - `-p <agent_directory>` — custom Agent installation path
+  - `-c <cert_file>` — path to a local copy of `datadog-cert.pem` for hosts that cannot reach `raw.githubusercontent.com`
+- **Compatibility notes**:
+  - Works with bash 3.1 (default on EL5) — no bash 4+ features
+  - On RHEL/CentOS/Oracle Linux 5 and 6, the script automatically applies EL5/6
+    compatibility mode: portable log truncation, insecure download fallback if the
+    system CA bundle is too old to verify GitHub, and no `journalctl` (SysV init)
 
-- **Requirements**: PowerShell 3.0 or higher, Administrator privileges
-- **Automatic features**: Auto-detects Agent v5 installation path (handles different versions and architectures)
+### `windows.ps1`
+
+- **Requirements**: PowerShell 2.0+, .NET 3.5+, Administrator privileges
+- **Options**:
+  - `-AgentDirectory` / `-p` — custom Agent installation path
+  - `-CertFile` / `-c` — path to a local copy of `datadog-cert.pem` for hosts that cannot reach `raw.githubusercontent.com`
+- **Compatibility notes**:
+  - Works on Windows Server 2008 R2, 2012 R2, 2016, and later
+  - Uses `System.Net.WebClient` (.NET 2.0) as the primary downloader so it works on
+    PS 2.0 (default on 2008 R2); `Invoke-WebRequest` and BITS are kept as fallbacks
+  - Forces TLS 1.2 using the raw integer value `3072` instead of the named enum
+    `[Net.SecurityProtocolType]::Tls12` (.NET 4.5+)
+  - **Windows 2008 R2 and TLS 1.2**: TLS 1.2 also requires a system-level fix
+    (KB3140245 + SChannel registry changes). Without it, downloads from GitHub will
+    fail. In that case, download `datadog-cert.pem` on another machine and use `-CertFile`.
 
 ## How to Use
 
@@ -48,45 +71,105 @@ chmod +x linux.sh
 sudo ./linux.sh
 ```
 
+The script auto-detects the OS version and applies EL5/6 compatibility mode when needed.
+
+If the host **cannot reach GitHub**, download `datadog-cert.pem` on another machine and transfer it manually, then pass it with `-c`:
+
+```bash
+sudo ./linux.sh -c /path/to/datadog-cert.pem
+```
+
 ### Windows
+
+On **Windows Server 2016+** (PS 3.0+):
 
 ```powershell
 # Download the script (run as Administrator)
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/DataDog/dd-agent/master/runbooks/sectigo-root-ca-rotation-2025/windows.ps1" -OutFile "windows.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/DataDog/dd-agent/master/runbooks/sectigo-root-ca-rotation-2025/windows.ps1" -OutFile "windows.ps1" -UseBasicParsing
 
 # Run the script
 .\windows.ps1
+```
+
+On **Windows Server 2008 R2** (PS 2.0, no `Invoke-WebRequest`), use `System.Net.WebClient` to download:
+
+```powershell
+# Download the script (run as Administrator)
+(New-Object System.Net.WebClient).DownloadFile(
+    "https://raw.githubusercontent.com/DataDog/dd-agent/master/runbooks/sectigo-root-ca-rotation-2025/windows.ps1",
+    "$env:TEMP\windows.ps1"
+)
+
+# Run the script
+& "$env:TEMP\windows.ps1"
+```
+
+If the host **cannot reach GitHub** (or TLS 1.2 is not yet enabled at the OS level on 2008 R2), download `datadog-cert.pem` on another machine, transfer it, then pass it with `-CertFile`:
+
+```powershell
+.\windows.ps1 -CertFile "C:\Temp\datadog-cert.pem"
 ```
 
 ## What the Scripts Do
 
 Both scripts perform the following steps automatically:
 
-1. **Download Updated Certificate**: Fetches the latest Datadog certificate bundle
+1. **Download Updated Certificate**: Fetches the latest Datadog certificate bundle (or uses the file you supply with `-c` / `-CertFile`)
 2. **Install Certificate**: Places the certificate in the correct location for your Agent installation
-3. **Update Configuration**: Enables `use_curl_http_client: true` in your datadog.conf to allow the Agent to use OS-provided certificates
+3. **Update Configuration**: Enables `use_curl_http_client: true` in your `datadog.conf` to allow the Agent to use OS-provided certificates
 4. **Restart Agent**: Restarts the Datadog Agent to apply changes
-5. **Verify Connectivity**: Checks logs for certificate errors and confirms API key validation
+5. **Verify Connectivity** *(best-effort)*: Scans fresh Agent logs for SSL/certificate errors and confirms API key validation. If automatic verification is not possible (e.g., network restrictions, no curl/wget, or a firewall blocks the test endpoint), the script completes with a warning and clear instructions to test manually — the certificate is still installed.
 
-The scripts will output detailed progress information and report any errors encountered.
+The scripts output detailed progress information and always print a final summary indicating what was done and, if applicable, what you need to verify manually.
 
 ## Expected Output
 
-When the script completes successfully, you should see:
+### Certificate replaced and connectivity verified
 
 ```
-Downloading the DataDog certificate...
-Certificate downloaded successfully to [path]
-Updating configuration file...
-Configuration file updated successfully.
-Restarting the DataDog Agent...
-Waiting 30 seconds for the DataDog Agent to restart...
+...
 === Connectivity test (since this restart) ===
+  Checking forwarder.log...
+  Checking agent status...
 API key validation: OK
-Connectivity test passed: no certificate verification errors since restart.
+Connectivity test passed: no certificate verification errors detected.
+
+==============================
+DONE — certificate replaced and connectivity verified successfully.
+
+The Datadog certificate has been installed at: /opt/datadog-agent/agent/datadog-cert.pem
+The Agent configuration has been updated, the Agent has been restarted,
+and no SSL/certificate errors were detected in the logs.
+==============================
 ```
 
-If errors are detected, the script will display a specific error message and prompt you to contact support.
+### Certificate replaced but connectivity could not be auto-verified
+
+This happens when network restrictions prevent the test connection, or when neither curl nor wget is available. The certificate is still correctly installed:
+
+```
+Warning: Could not verify connectivity to https://app.datadoghq.com using the installed certificate.
+  This may be a network restriction, firewall rule, or temporary issue.
+  The certificate has been installed; connectivity will be confirmed after the Agent restarts.
+...
+==============================
+DONE — certificate replaced, but connectivity could not be fully verified automatically.
+
+The Datadog certificate has been installed at: /opt/datadog-agent/agent/datadog-cert.pem
+The Agent configuration has been updated and the Agent has been restarted.
+
+Please verify connectivity manually:
+  sudo service datadog-agent status
+  sudo /etc/init.d/datadog-agent info
+  Check logs for SSL errors:
+    /var/log/datadog/forwarder.log
+    /var/log/datadog/collector.log
+
+If SSL errors persist, contact support with the log output above.
+==============================
+```
+
+If a *fatal* step fails (certificate not found, config file missing, Agent failed to restart), the script exits immediately with a specific error message explaining why.
 
 ## Important Notes
 
@@ -96,7 +179,7 @@ The fallback mechanism (`use_curl_http_client: true`) relies on your operating s
 
 ### Configuration Changes
 
-The script modifies your `/etc/dd-agent/datadog.conf` (Linux) or `C:\ProgramData\Datadog\datadog.conf` (Windows) file. On Windows, a backup is automatically created before modification.
+The script modifies your `/etc/dd-agent/datadog.conf` (Linux) or `C:\ProgramData\Datadog\datadog.conf` (Windows) file. On both platforms, a timestamped backup (`*.pre-cert-update-<timestamp>` on Linux, `*.bak-<timestamp>` on Windows) is automatically created before modification.
 
 ### Network Requirements
 
@@ -111,6 +194,18 @@ Ensure your firewall allows these connections.
 ### Script Fails to Download Certificate
 
 Ensure you have network connectivity and your firewall allows outbound HTTPS connections to GitHub.
+
+If the host cannot reach GitHub at all, download `datadog-cert.pem` from another machine and pass it directly to the script:
+
+**Linux (EL5/6)**:
+```bash
+sudo ./linux.sh -c /path/to/datadog-cert.pem
+```
+
+**Windows**:
+```powershell
+.\windows.ps1 -CertFile "C:\Temp\datadog-cert.pem"
+```
 
 ### Agent Fails to Restart
 
@@ -128,15 +223,17 @@ sudo service datadog-agent status
 Get-Service DatadogAgent
 ```
 
-### Connectivity Test Fails
+### Connectivity Could Not Be Verified Automatically
 
-If certificate errors persist after running the script:
+The script completes even when it cannot verify connectivity (e.g., the test endpoint is blocked by a firewall). It will print a warning and a manual checklist at the end.
 
-1. Verify your operating system is receiving security updates
-2. Check the Agent logs for detailed error messages:
+If SSL/certificate errors **persist after the Agent has restarted**, check:
+
+1. Verify your operating system is receiving security updates (the `use_curl_http_client: true` fallback relies on the OS certificate store)
+2. Check the Agent logs for SSL/certificate error messages:
    - Linux: `/var/log/datadog/forwarder.log` and `/var/log/datadog/collector.log`
    - Windows: `C:\ProgramData\Datadog\logs\forwarder.log` and `collector.log`
-3. Contact Datadog Support with the script output and log excerpts
+3. Contact Datadog Support with the full script output and relevant log excerpts
 
 ### Permission Errors
 
