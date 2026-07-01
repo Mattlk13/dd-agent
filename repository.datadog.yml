@@ -1,0 +1,5 @@
+schema-version: v2
+kind: adms
+auto-version-updates:
+  disabled:
+    reason: Disable dependency update PRs
